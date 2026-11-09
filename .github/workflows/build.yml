@@ -89,7 +89,7 @@ jobs:
         if: ${{ failure() && steps.check.conclusion == 'failure' }}
         run: |
           make regen-abidump
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         name: Publish updated ABI files
         if: ${{ failure() && steps.check.conclusion == 'failure' }}
         with:
@@ -511,7 +511,7 @@ jobs:
           -x test_subprocess \
           -x test_signal \
           -x test_sysconfig
-    - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       if: always()
       with:
         name: hypothesis-example-db
