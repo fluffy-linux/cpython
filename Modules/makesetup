@@ -1,4 +1,4 @@
-#! /bin/sh
+#!/sw/bash/bin/bash
 set -e
 
 # Convert templates into Makefile and config.c, based on the module

@@ -1,2 +1,2 @@
-#!/bin/sh
+#!/sw/bash/bin/bash
 svn export --force http://svn.red-bean.com/bob/macholib/trunk/macholib/ .
