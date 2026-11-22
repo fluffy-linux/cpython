@@ -68,6 +68,10 @@ if 'posix' in _names:
         from posix import _create_environ
     except ImportError:
         pass
+    try:
+        from posix import _glob
+    except ImportError:
+        pass
 
     import posix
     __all__.extend(_get_exports_list(posix))

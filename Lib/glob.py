@@ -10,6 +10,73 @@ import operator
 import stat
 import sys
 
+try:
+    import posix as _posix
+except ImportError:
+    _posix = None
+
+try:
+    import _locale
+except ImportError:
+    _locale = None
+
+_HAS_POSIX_FAST_GLOB = (
+    _posix is not None
+    and hasattr(_posix, "GLOB_KEEP_SLASHES")
+    and hasattr(_posix, "GLOB_SKIPDOTS")
+)
+if _HAS_POSIX_FAST_GLOB:
+    _POSIX_GLOB_BASE = (
+        _posix.GLOB_NOESCAPE | _posix.GLOB_KEEP_SLASHES | _posix.GLOB_SKIPDOTS
+    )
+    _POSIX_GLOB_HIDDEN = (
+        _posix.GLOB_PERIOD | getattr(_posix, "GLOB_DOTDOT", 0)
+    )
+
+
+def _is_utf8_fs():
+    return sys.getfilesystemencoding().lower() in ("utf-8", "utf8")
+
+
+def _is_valid_utf8(s):
+    if s.isascii():
+        return True
+    try:
+        s.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _check_fast_brackets(pat):
+    i = 0
+    n = len(pat)
+    need_c_collate = False
+    while i < n:
+        if pat[i] == "[":
+            j = i + 1
+            if j < n and pat[j] in "!^":
+                return False
+            body_start = j
+            if j < n and pat[j] == "]":
+                j += 1
+            close = pat.find("]", j)
+            if close != -1 and "/" not in pat[body_start:close]:
+                body = pat[body_start:close]
+                if not body.isascii():
+                    return False
+                if "-" in body[1:-1]:
+                    need_c_collate = True
+                i = close + 1
+                continue
+        i += 1
+    if need_c_collate:
+        return (
+            _locale is not None
+            and _locale.setlocale(_locale.LC_COLLATE, None) in ("C", "POSIX")
+        )
+    return True
+
 
 __all__ = ["glob", "iglob", "escape", "translate"]
 
@@ -40,6 +107,36 @@ def glob(pathname, *, root_dir=None, dir_fd=None, recursive=False,
     If `recursive` is true, the pattern '**' will match any files and
     zero or more directories and subdirectories.
     """
+    if (
+        _HAS_POSIX_FAST_GLOB
+        and dir_fd is None
+        and isinstance(pathname, str)
+        and pathname
+        and "\x00" not in pathname
+        and ("*" in pathname or "[" in pathname)
+        and not isinstance(root_dir, bytes)
+        and not (isinstance(root_dir, str) and "\x00" in root_dir)
+        and os.path.normcase("abCD") == "abCD"
+    ):
+        can_fast = (
+            not (recursive and "**" in pathname)
+            and "//" not in pathname.rstrip("/")
+            and "?" not in pathname
+            and "[!" not in pathname
+            and "[^" not in pathname
+            and "[:" not in pathname
+            and "[." not in pathname
+            and "[=" not in pathname
+            and (pathname.isascii() or (_is_utf8_fs() and _is_valid_utf8(pathname)))
+            and ("[" not in pathname or _check_fast_brackets(pathname))
+        )
+        if can_fast:
+            sys.audit("glob.glob", pathname, recursive)
+            sys.audit("glob.glob/2", pathname, recursive, root_dir, dir_fd)
+            flags = _POSIX_GLOB_BASE
+            if include_hidden:
+                flags |= _POSIX_GLOB_HIDDEN
+            return _posix._glob(pathname, flags, root_dir)
     return list(iglob(pathname, root_dir=root_dir, dir_fd=dir_fd, recursive=recursive,
                       include_hidden=include_hidden))
 

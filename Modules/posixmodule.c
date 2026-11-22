@@ -17113,6 +17113,565 @@ os__emscripten_log_impl(PyObject *module, const char *arg)
 }
 #endif /* __EMSCRIPTEN__ */
 
+#ifndef MS_WINDOWS
+#include <glob.h>
+
+static int
+os_glob_allowed_flags(void)
+{
+    int allowed = 0;
+#ifdef GLOB_ERR
+    allowed |= GLOB_ERR;
+#endif
+#ifdef GLOB_MARK
+    allowed |= GLOB_MARK;
+#endif
+#ifdef GLOB_NOSORT
+    allowed |= GLOB_NOSORT;
+#endif
+#ifdef GLOB_NOCHECK
+    allowed |= GLOB_NOCHECK;
+#endif
+#ifdef GLOB_NOESCAPE
+    allowed |= GLOB_NOESCAPE;
+#endif
+#ifdef GLOB_PERIOD
+    allowed |= GLOB_PERIOD;
+#endif
+#ifdef GLOB_BRACE
+    allowed |= GLOB_BRACE;
+#endif
+#ifdef GLOB_NOMAGIC
+    allowed |= GLOB_NOMAGIC;
+#endif
+#ifdef GLOB_TILDE
+    allowed |= GLOB_TILDE;
+#endif
+#ifdef GLOB_ONLYDIR
+    allowed |= GLOB_ONLYDIR;
+#endif
+#ifdef GLOB_TILDE_CHECK
+    allowed |= GLOB_TILDE_CHECK;
+#endif
+#ifdef GLOB_PATHS
+    allowed |= GLOB_PATHS;
+#endif
+#ifdef GLOB_KEEP_SLASHES
+    allowed |= GLOB_KEEP_SLASHES;
+#endif
+#ifdef GLOB_EXTMATCH
+    allowed |= GLOB_EXTMATCH;
+#endif
+#ifdef GLOB_CASEFOLD
+    allowed |= GLOB_CASEFOLD;
+#endif
+#ifdef GLOB_SKIPDOTS
+    allowed |= GLOB_SKIPDOTS;
+#endif
+#ifdef GLOB_GLOBSTAR
+    allowed |= GLOB_GLOBSTAR;
+#endif
+#ifdef GLOB_DOTDOT
+    allowed |= GLOB_DOTDOT;
+#endif
+    return allowed;
+}
+
+static int
+os_glob_pat_has_magic(const char *pat, int flags)
+{
+    int quote = !(flags & GLOB_NOESCAPE);
+#ifdef GLOB_CASEFOLD
+    if (flags & GLOB_CASEFOLD) {
+        return 1;
+    }
+#endif
+#ifdef GLOB_BRACE
+    int gbrace = (flags & GLOB_BRACE) != 0;
+#else
+    int gbrace = 0;
+#endif
+#ifdef GLOB_EXTMATCH
+    int extm = (flags & GLOB_EXTMATCH) != 0;
+#else
+    int extm = 0;
+#endif
+    int gtilde = 0;
+#ifdef GLOB_TILDE
+    if (flags & GLOB_TILDE) gtilde = 1;
+#endif
+#ifdef GLOB_TILDE_CHECK
+    if (flags & GLOB_TILDE_CHECK) gtilde = 1;
+#endif
+    if (gtilde && pat[0] == '~') {
+        return 1;
+    }
+    int has_brace = 0;
+    for (const char *p = pat; *p != '\0'; p++) {
+        switch (*p) {
+        case '\\':
+            if (quote && p[1] != '\0') {
+                p++;
+            }
+            break;
+        case '*':
+        case '?':
+        case '[':
+            return 1;
+        case '+':
+        case '@':
+        case '!':
+            if (extm && p[1] == '(') {
+                return 1;
+            }
+            break;
+        case '{':
+            if (gbrace) {
+                has_brace = 1;
+            }
+            break;
+        case '}':
+            if (has_brace) {
+                return 1;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    return 0;
+}
+
+static int
+os_glob_root_needs_escape(const char *root_str, size_t rlen, int flags)
+{
+#ifdef GLOB_PATHS
+    int gpaths = (flags & GLOB_PATHS) != 0;
+#else
+    int gpaths = 0;
+#endif
+#ifdef GLOB_EXTMATCH
+    int extm = (flags & GLOB_EXTMATCH) != 0;
+#else
+    int extm = 0;
+#endif
+#ifdef GLOB_BRACE
+    int gbrace = (flags & GLOB_BRACE) != 0;
+#else
+    int gbrace = 0;
+#endif
+    int gtilde = 0;
+#ifdef GLOB_TILDE
+    if (flags & GLOB_TILDE) gtilde = 1;
+#endif
+#ifdef GLOB_TILDE_CHECK
+    if (flags & GLOB_TILDE_CHECK) gtilde = 1;
+#endif
+    for (size_t i = 0; i < rlen; i++) {
+        char c = root_str[i];
+        if (c == '*' || c == '?' || c == '['
+            || (gpaths && c == ':')
+            || (extm && c == '(')
+            || (gbrace && (c == '{' || c == '}'))
+            || (gtilde && i == 0 && c == '~')) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static char *
+os_glob_build_rooted_pattern(const char *root_str, size_t rlen,
+                             const char *pat_str, size_t pat_len, int flags,
+                             int *out_call_flags, size_t *out_esc_prefix_len,
+                             int *out_doubled_bs)
+{
+    int force_bs = ((flags & GLOB_NOESCAPE)
+                    && os_glob_root_needs_escape(root_str, rlen, flags));
+    int call_flags = force_bs ? (flags & ~GLOB_NOESCAPE) : flags;
+    *out_call_flags = call_flags;
+    *out_doubled_bs = force_bs;
+
+    /* Worst case: each byte in root_str expands to 3 bytes ("[c]"), and under
+       force_bs each '\\' in pat_str doubles to 2 bytes, plus '/' and NUL. */
+    if (pat_len > SIZE_MAX / 2
+        || rlen > (SIZE_MAX - pat_len * 2 - 2) / 3) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    char *buf = PyMem_Malloc(rlen * 3 + 1 + pat_len * 2 + 1);
+    if (buf == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    char *d = buf;
+    if (rlen == 1 && root_str[0] == '/') {
+        *d++ = '/';
+    } else {
+        int noesc = (call_flags & GLOB_NOESCAPE) != 0;
+#ifdef GLOB_PATHS
+        int gpaths = (call_flags & GLOB_PATHS) != 0;
+#else
+        int gpaths = 0;
+#endif
+#ifdef GLOB_EXTMATCH
+        int extm = (call_flags & GLOB_EXTMATCH) != 0;
+#else
+        int extm = 0;
+#endif
+#ifdef GLOB_BRACE
+        int gbrace = (call_flags & GLOB_BRACE) != 0;
+#else
+        int gbrace = 0;
+#endif
+        int gtilde = 0;
+#ifdef GLOB_TILDE
+        if (call_flags & GLOB_TILDE) gtilde = 1;
+#endif
+#ifdef GLOB_TILDE_CHECK
+        if (call_flags & GLOB_TILDE_CHECK) gtilde = 1;
+#endif
+        for (size_t i = 0; i < rlen; i++) {
+            char c = root_str[i];
+            if (noesc) {
+                if (c == '*' || c == '?' || c == '['
+                    || (gpaths && c == ':')
+                    || (extm && c == '(')
+                    || (gbrace && (c == '{' || c == '}'))
+                    || (gtilde && i == 0 && c == '~')) {
+                    *d++ = '[';
+                    *d++ = c;
+                    *d++ = ']';
+                } else {
+                    *d++ = c;
+                }
+            } else {
+                if (c == '\\' || c == '*' || c == '?' || c == '[' || c == ':'
+                    || c == '{' || c == '}' || c == '~' || c == '(') {
+                    *d++ = '\\';
+                }
+                *d++ = c;
+            }
+        }
+        *d++ = '/';
+    }
+    *out_esc_prefix_len = (size_t)(d - buf);
+    if (force_bs) {
+        for (size_t i = 0; i < pat_len; i++) {
+            if (pat_str[i] == '\\') {
+                *d++ = '\\';
+            }
+            *d++ = pat_str[i];
+        }
+        *d = '\0';
+    } else {
+        memcpy(d, pat_str, pat_len + 1);
+    }
+    return buf;
+}
+
+static PyObject *
+os__glob(PyObject *Py_UNUSED(module), PyObject *args, PyObject *kwargs)
+{
+    static char *kwlist[] = {"pattern", "flags", "root_dir", NULL};
+    PyObject *pat_obj = NULL;
+    int flags = 0;
+    PyObject *root_obj = Py_None;
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|iO:_glob", kwlist,
+                                     &pat_obj, &flags, &root_obj)) {
+        return NULL;
+    }
+
+    if ((flags & ~os_glob_allowed_flags()) != 0) {
+        PyErr_SetString(PyExc_ValueError, "unsupported glob flags");
+        return NULL;
+    }
+
+    int is_bytes = 0;
+    PyObject *pat_bytes = NULL;
+    if (PyUnicode_Check(pat_obj)) {
+        pat_bytes = PyUnicode_EncodeFSDefault(pat_obj);
+        if (pat_bytes == NULL) {
+            return NULL;
+        }
+    } else if (PyBytes_Check(pat_obj)) {
+        is_bytes = 1;
+        pat_bytes = Py_NewRef(pat_obj);
+    } else {
+        PyErr_Format(PyExc_TypeError,
+                     "pathname should be str or bytes, not %T", pat_obj);
+        return NULL;
+    }
+
+    const char *pat_str = PyBytes_AS_STRING(pat_bytes);
+    size_t pat_len = (size_t)PyBytes_GET_SIZE(pat_bytes);
+    if (pat_len != strlen(pat_str)) {
+        Py_DECREF(pat_bytes);
+        PyErr_SetString(PyExc_ValueError, "embedded null character");
+        return NULL;
+    }
+
+    PyObject *root_bytes = NULL;
+    const char *root_str = NULL;
+    size_t root_len = 0;
+    if (root_obj != NULL && root_obj != Py_None) {
+        PyObject *root_fspath = PyOS_FSPath(root_obj);
+        if (root_fspath == NULL) {
+            Py_DECREF(pat_bytes);
+            return NULL;
+        }
+        if ((is_bytes && !PyBytes_Check(root_fspath))
+            || (!is_bytes && !PyUnicode_Check(root_fspath))) {
+            Py_DECREF(root_fspath);
+            Py_DECREF(pat_bytes);
+            PyErr_SetString(PyExc_TypeError,
+                            "Can't mix strings and bytes in path components");
+            return NULL;
+        }
+        if (is_bytes) {
+            root_bytes = root_fspath;
+        } else {
+            root_bytes = PyUnicode_EncodeFSDefault(root_fspath);
+            Py_DECREF(root_fspath);
+            if (root_bytes == NULL) {
+                Py_DECREF(pat_bytes);
+                return NULL;
+            }
+        }
+        root_str = PyBytes_AS_STRING(root_bytes);
+        root_len = (size_t)PyBytes_GET_SIZE(root_bytes);
+        if (root_len != strlen(root_str)) {
+            Py_DECREF(root_bytes);
+            Py_DECREF(pat_bytes);
+            PyErr_SetString(PyExc_ValueError, "embedded null character");
+            return NULL;
+        }
+    }
+
+#ifdef GLOB_PATHS
+    int has_glob_paths = (flags & GLOB_PATHS) != 0;
+#else
+    int has_glob_paths = 0;
+#endif
+    if (pat_len == 0 && !has_glob_paths) {
+        Py_XDECREF(root_bytes);
+        Py_DECREF(pat_bytes);
+        return PyList_New(0);
+    }
+
+    char *norm_root = NULL;
+    char *alloc_pat = NULL;
+    const char *c_pattern = pat_str;
+    int call_flags = flags;
+    size_t rlen = 0;
+    size_t strip_len = 0;
+    size_t esc_prefix_len = 0;
+    int doubled_bs = 0;
+    size_t orig_pat_slashes = 0;
+    int pat_has_magic = 0;
+#ifdef GLOB_KEEP_SLASHES
+    if (flags & GLOB_KEEP_SLASHES) {
+        while (orig_pat_slashes < pat_len
+               && pat_str[pat_len - 1 - orig_pat_slashes] == '/') {
+            orig_pat_slashes++;
+        }
+        if (orig_pat_slashes > 1) {
+            pat_has_magic = os_glob_pat_has_magic(pat_str, flags);
+        }
+    }
+#endif
+    int tilde_rel = 0;
+#ifdef GLOB_TILDE
+    if ((flags & GLOB_TILDE) && pat_str[0] == '~') tilde_rel = 1;
+#endif
+#ifdef GLOB_TILDE_CHECK
+    if ((flags & GLOB_TILDE_CHECK) && pat_str[0] == '~') tilde_rel = 1;
+#endif
+    if (root_bytes != NULL && root_len > 0 && pat_str[0] != '/' && !tilde_rel
+        && !has_glob_paths) {
+        norm_root = PyMem_Malloc(root_len + 1);
+        if (norm_root == NULL) {
+            Py_DECREF(root_bytes);
+            Py_DECREF(pat_bytes);
+            return PyErr_NoMemory();
+        }
+        size_t nr = 0;
+        for (size_t i = 0; i < root_len; i++) {
+            if (root_str[i] == '/' && nr > 0 && norm_root[nr - 1] == '/') {
+                continue;
+            }
+            norm_root[nr++] = root_str[i];
+        }
+        while (nr > 1 && norm_root[nr - 1] == '/') {
+            nr--;
+        }
+        norm_root[nr] = '\0';
+        rlen = nr;
+        strip_len = (rlen == 1 && norm_root[0] == '/') ? 1 : (rlen + 1);
+        alloc_pat = os_glob_build_rooted_pattern(norm_root, rlen, pat_str,
+                                                 pat_len, flags, &call_flags,
+                                                 &esc_prefix_len, &doubled_bs);
+        if (alloc_pat == NULL) {
+            PyMem_Free(norm_root);
+            Py_DECREF(root_bytes);
+            Py_DECREF(pat_bytes);
+            return NULL;
+        }
+        c_pattern = alloc_pat;
+    }
+
+    int nomatch_return_pat = 0;
+    if (strip_len > 0) {
+#ifdef GLOB_NOCHECK
+        if (flags & GLOB_NOCHECK) {
+            nomatch_return_pat = 1;
+        }
+#endif
+#ifdef GLOB_NOMAGIC
+        if (!nomatch_return_pat && (flags & GLOB_NOMAGIC)
+            && !os_glob_pat_has_magic(pat_str, flags)
+            && ((flags & GLOB_NOESCAPE) || strchr(pat_str, '\\') == NULL)) {
+            nomatch_return_pat = 1;
+        }
+#endif
+    }
+
+    glob_t g = { 0 };
+    int rc;
+    Py_BEGIN_ALLOW_THREADS
+    rc = glob(c_pattern, call_flags, NULL, &g);
+    Py_END_ALLOW_THREADS
+
+    Py_DECREF(pat_bytes);
+    Py_XDECREF(root_bytes);
+
+    if (rc == GLOB_NOSPACE) {
+        globfree(&g);
+        PyMem_Free(alloc_pat);
+        PyMem_Free(norm_root);
+        return PyErr_NoMemory();
+    }
+
+    PyObject *list = PyList_New(0);
+    if (list == NULL) {
+        globfree(&g);
+        PyMem_Free(alloc_pat);
+        PyMem_Free(norm_root);
+        return NULL;
+    }
+
+    int allow_nocheck_fb = 0;
+#ifdef GLOB_NOCHECK
+    if (flags & GLOB_NOCHECK) allow_nocheck_fb = 1;
+#endif
+#ifdef GLOB_NOMAGIC
+    if (flags & GLOB_NOMAGIC) allow_nocheck_fb = 1;
+#endif
+
+    if (rc == 0) {
+        for (size_t i = 0; i < g.gl_pathc; i++) {
+            const char *s = g.gl_pathv[i];
+            int is_nocheck_fb = 0;
+            if (strip_len > 0) {
+                if (strncmp(s, norm_root, rlen) == 0
+                    && ((rlen == 1 && norm_root[0] == '/') || s[rlen] == '/')) {
+                    s += strip_len;
+                } else if (allow_nocheck_fb && esc_prefix_len > 0
+                           && alloc_pat != NULL
+                           && strncmp(s, alloc_pat, esc_prefix_len) == 0) {
+                    s += esc_prefix_len;
+                    is_nocheck_fb = 1;
+                } else {
+                    continue;
+                }
+            }
+            PyObject *item = NULL;
+            size_t slen = strlen(s);
+            char *unesc_fb = NULL;
+            if (is_nocheck_fb && doubled_bs) {
+                unesc_fb = PyMem_Malloc(slen + 1);
+                if (unesc_fb == NULL) {
+                    Py_DECREF(list);
+                    globfree(&g);
+                    PyMem_Free(alloc_pat);
+                    PyMem_Free(norm_root);
+                    return PyErr_NoMemory();
+                }
+                size_t ulen = 0;
+                for (size_t k = 0; k < slen; k++) {
+                    if (s[k] == '\\' && s[k + 1] == '\\') {
+                        k++;
+                    }
+                    unesc_fb[ulen++] = s[k];
+                }
+                unesc_fb[ulen] = '\0';
+                s = unesc_fb;
+                slen = ulen;
+            }
+            size_t cur_slashes = 0;
+            if (orig_pat_slashes > 1 && pat_has_magic && !allow_nocheck_fb) {
+                while (slen > 1 && s[slen - 1] == '/' && s[slen - 2] == '/') {
+                    slen--;
+                }
+            } else if (strip_len > 0 && orig_pat_slashes > 1 && !pat_has_magic) {
+                while (cur_slashes < slen && s[slen - 1 - cur_slashes] == '/') {
+                    cur_slashes++;
+                }
+            }
+            if (cur_slashes > 0 && cur_slashes < orig_pat_slashes) {
+                size_t add_slashes = orig_pat_slashes - cur_slashes;
+                char *tmp = PyMem_Malloc(slen + add_slashes + 1);
+                if (tmp == NULL) {
+                    PyMem_Free(unesc_fb);
+                    Py_DECREF(list);
+                    globfree(&g);
+                    PyMem_Free(alloc_pat);
+                    PyMem_Free(norm_root);
+                    return PyErr_NoMemory();
+                }
+                memcpy(tmp, s, slen);
+                memset(tmp + slen, '/', add_slashes);
+                tmp[slen + add_slashes] = '\0';
+                item = is_bytes
+                       ? PyBytes_FromStringAndSize(tmp, (Py_ssize_t)(slen + add_slashes))
+                       : PyUnicode_DecodeFSDefaultAndSize(tmp, (Py_ssize_t)(slen + add_slashes));
+                PyMem_Free(tmp);
+            } else {
+                item = is_bytes
+                       ? PyBytes_FromStringAndSize(s, (Py_ssize_t)slen)
+                       : PyUnicode_DecodeFSDefaultAndSize(s, (Py_ssize_t)slen);
+            }
+            PyMem_Free(unesc_fb);
+            if (item == NULL || PyList_Append(list, item) < 0) {
+                Py_XDECREF(item);
+                Py_DECREF(list);
+                globfree(&g);
+                PyMem_Free(alloc_pat);
+                PyMem_Free(norm_root);
+                return NULL;
+            }
+            Py_DECREF(item);
+        }
+    }
+    if ((rc == GLOB_NOMATCH || (rc == 0 && PyList_GET_SIZE(list) == 0))
+        && nomatch_return_pat) {
+        if (PyList_Append(list, pat_obj) < 0) {
+            Py_DECREF(list);
+            globfree(&g);
+            PyMem_Free(alloc_pat);
+            PyMem_Free(norm_root);
+            return NULL;
+        }
+    }
+    globfree(&g);
+    PyMem_Free(alloc_pat);
+    PyMem_Free(norm_root);
+
+    return list;
+}
+#endif /* !MS_WINDOWS */
+
 
 static PyMethodDef posix_methods[] = {
     OS_STAT_METHODDEF
@@ -17331,6 +17890,9 @@ static PyMethodDef posix_methods[] = {
     OS__CREATE_ENVIRON_METHODDEF
     OS__EMSCRIPTEN_DEBUGGER_METHODDEF
     OS__EMSCRIPTEN_LOG_METHODDEF
+#ifndef MS_WINDOWS
+    {"_glob", _PyCFunction_CAST(os__glob), METH_VARARGS | METH_KEYWORDS, NULL},
+#endif
     {NULL,              NULL}            /* Sentinel */
 };
 
@@ -17967,6 +18529,61 @@ all_ins(PyObject *m)
     if (PyModule_AddIntConstant(m, "_LOAD_LIBRARY_SEARCH_SYSTEM32", LOAD_LIBRARY_SEARCH_SYSTEM32)) return -1;
     if (PyModule_AddIntConstant(m, "_LOAD_LIBRARY_SEARCH_USER_DIRS", LOAD_LIBRARY_SEARCH_USER_DIRS)) return -1;
     if (PyModule_AddIntConstant(m, "_LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR", LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR)) return -1;
+#else
+#ifdef GLOB_ERR
+    if (PyModule_AddIntMacro(m, GLOB_ERR)) return -1;
+#endif
+#ifdef GLOB_MARK
+    if (PyModule_AddIntMacro(m, GLOB_MARK)) return -1;
+#endif
+#ifdef GLOB_NOSORT
+    if (PyModule_AddIntMacro(m, GLOB_NOSORT)) return -1;
+#endif
+#ifdef GLOB_NOCHECK
+    if (PyModule_AddIntMacro(m, GLOB_NOCHECK)) return -1;
+#endif
+#ifdef GLOB_NOESCAPE
+    if (PyModule_AddIntMacro(m, GLOB_NOESCAPE)) return -1;
+#endif
+#ifdef GLOB_PERIOD
+    if (PyModule_AddIntMacro(m, GLOB_PERIOD)) return -1;
+#endif
+#ifdef GLOB_BRACE
+    if (PyModule_AddIntMacro(m, GLOB_BRACE)) return -1;
+#endif
+#ifdef GLOB_NOMAGIC
+    if (PyModule_AddIntMacro(m, GLOB_NOMAGIC)) return -1;
+#endif
+#ifdef GLOB_TILDE
+    if (PyModule_AddIntMacro(m, GLOB_TILDE)) return -1;
+#endif
+#ifdef GLOB_ONLYDIR
+    if (PyModule_AddIntMacro(m, GLOB_ONLYDIR)) return -1;
+#endif
+#ifdef GLOB_TILDE_CHECK
+    if (PyModule_AddIntMacro(m, GLOB_TILDE_CHECK)) return -1;
+#endif
+#ifdef GLOB_PATHS
+    if (PyModule_AddIntMacro(m, GLOB_PATHS)) return -1;
+#endif
+#ifdef GLOB_KEEP_SLASHES
+    if (PyModule_AddIntMacro(m, GLOB_KEEP_SLASHES)) return -1;
+#endif
+#ifdef GLOB_EXTMATCH
+    if (PyModule_AddIntMacro(m, GLOB_EXTMATCH)) return -1;
+#endif
+#ifdef GLOB_CASEFOLD
+    if (PyModule_AddIntMacro(m, GLOB_CASEFOLD)) return -1;
+#endif
+#ifdef GLOB_SKIPDOTS
+    if (PyModule_AddIntMacro(m, GLOB_SKIPDOTS)) return -1;
+#endif
+#ifdef GLOB_GLOBSTAR
+    if (PyModule_AddIntMacro(m, GLOB_GLOBSTAR)) return -1;
+#endif
+#ifdef GLOB_DOTDOT
+    if (PyModule_AddIntMacro(m, GLOB_DOTDOT)) return -1;
+#endif
 #endif
 
     return 0;
