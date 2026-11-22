@@ -1,7 +1,9 @@
 import copy
+import fnmatch
 import ntpath
 import pathlib
 import posixpath
+import sys
 import unittest
 
 from test.support import verbose
@@ -839,6 +841,121 @@ class MockGetPathTests(unittest.TestCase):
         actual = getpath(ns, expected)
         self.assertEqual(expected, actual)
 
+    def test_wildcard_env_path_posix(self):
+        "Test resolving executable via wildcard ENV_PATH on POSIX."
+        ns = MockPosixNamespace(
+            PREFIX="/sw/python",
+            argv0="python3",
+            ENV_PATH="/sw/*/bin",
+        )
+        ns.add_known_xfile("/sw/python/bin/python3")
+        ns.add_known_file("/sw/python/lib/python9.8/os.py")
+        ns.add_known_dir("/sw/python/lib/python9.8/lib-dynload")
+        expected = dict(
+            executable="/sw/python/bin/python3",
+            base_executable="/sw/python/bin/python3",
+            prefix="/sw/python",
+            exec_prefix="/sw/python",
+            module_search_paths_set=1,
+            module_search_paths=[
+                "/sw/python/lib/python98.zip",
+                "/sw/python/lib/python9.8",
+                "/sw/python/lib/python9.8/lib-dynload",
+            ],
+        )
+        actual = getpath(ns, expected)
+        self.assertEqual(expected, actual)
+
+        ns_bracket = MockPosixNamespace(
+            PREFIX="/sw/python",
+            argv0="python3",
+            ENV_PATH="/sw/[unclosed/sub:/sw/[p]ython/bin",
+        )
+        ns_bracket.add_known_xfile("/sw/python/bin/python3")
+        ns_bracket.add_known_file("/sw/python/lib/python9.8/os.py")
+        ns_bracket.add_known_dir("/sw/python/lib/python9.8/lib-dynload")
+        self.assertEqual(expected, getpath(ns_bracket, expected))
+
+        ns_colon_bkt = MockPosixNamespace(
+            PREFIX="/sw/py:thon",
+            argv0="python3",
+            ENV_PATH="/sw/[unclosed/sub:/sw/py[x:]thon/bin",
+        )
+        ns_colon_bkt.add_known_xfile("/sw/py:thon/bin/python3")
+        ns_colon_bkt.add_known_file("/sw/py:thon/lib/python9.8/os.py")
+        ns_colon_bkt.add_known_dir("/sw/py:thon/lib/python9.8/lib-dynload")
+        expected_colon = dict(
+            executable="/sw/py:thon/bin/python3",
+            base_executable="/sw/py:thon/bin/python3",
+            prefix="/sw/py:thon",
+            exec_prefix="/sw/py:thon",
+            module_search_paths_set=1,
+            module_search_paths=[
+                "/sw/py:thon/lib/python98.zip",
+                "/sw/py:thon/lib/python9.8",
+                "/sw/py:thon/lib/python9.8/lib-dynload",
+            ],
+        )
+        self.assertEqual(expected_colon, getpath(ns_colon_bkt, expected_colon))
+
+        # argv0 containing glob metacharacters must be matched literally, not globbed
+        ns_meta_argv0 = MockPosixNamespace(
+            PREFIX="/sw/python",
+            argv0="python[3]",
+            ENV_PATH="/sw/*/bin",
+        )
+        ns_meta_argv0.add_known_xfile("/sw/python/bin/python3")
+        ns_meta_argv0.add_known_file("/sw/python/lib/python9.8/os.py")
+        ns_meta_argv0.add_known_dir("/sw/python/lib/python9.8/lib-dynload")
+        self.assertEqual("", getpath(ns_meta_argv0, ["executable"])["executable"])
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX wildcard PATH test")
+    def test_frozen_getpath_wildcard_subprocess(self):
+        import os
+        import subprocess
+        import tempfile
+
+        if not sys.executable or not os.path.exists(sys.executable):
+            self.skipTest("requires valid sys.executable")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            py_bin_dir = os.path.join(tmpdir, "python", "bin")
+            os.makedirs(py_bin_dir)
+            os.makedirs(os.path.join(tmpdir, "other", "bin"))
+            py_link = os.path.join(py_bin_dir, "python3")
+            os.symlink(sys.executable, py_link)
+
+            env = os.environ.copy()
+            env["PATH"] = os.path.join(tmpdir, "*", "bin")
+            env.pop("PYTHONEXECUTABLE", None)
+            proc = subprocess.run(
+                ["python3", "-c", "import sys; print(sys.executable)"],
+                executable=py_link,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(proc.stdout.strip(), py_link)
+
+            colon_bin_dir = os.path.join(tmpdir, "zz:py", "bin")
+            os.makedirs(colon_bin_dir)
+            colon_link = os.path.join(colon_bin_dir, "python3")
+            os.symlink(sys.executable, colon_link)
+            env["PATH"] = (
+                os.path.join(tmpdir, "[unclosed", "sub")
+                + ":"
+                + os.path.join(tmpdir, "zz[x:]py", "bin")
+            )
+            proc2 = subprocess.run(
+                ["python3", "-c", "import sys; print(sys.executable)"],
+                executable=colon_link,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(proc2.stdout.strip(), colon_link)
+
     def test_explicitly_set_stdlib_dir(self):
         """Test the explicitly set stdlib_dir in the config is respected."""
         ns = MockPosixNamespace(
@@ -1186,6 +1303,9 @@ class MockPosixNamespace(dict):
         if verbose:
             print("Check if", path, "is a module")
         return path in self._files and path.rpartition(".")[2] == "py"
+
+    def glob(self, pattern):
+        return sorted(d for d in self._dirs if fnmatch.fnmatchcase(d, pattern))
 
     def isxfile(self, path):
         if verbose:

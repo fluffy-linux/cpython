@@ -24,6 +24,10 @@
 #  include <dlfcn.h>
 #endif
 
+#ifndef MS_WINDOWS
+#  include <glob.h>
+#endif
+
 /* Reference the precompiled getpath.py */
 #include "Python/frozen_modules/getpath.h"
 
@@ -563,10 +567,72 @@ done:
 }
 
 
+static PyObject *
+getpath_glob(PyObject *Py_UNUSED(self), PyObject *args)
+{
+    PyObject *pathobj;
+    if (!PyArg_ParseTuple(args, "U", &pathobj)) {
+        return NULL;
+    }
+    wchar_t *wpath = PyUnicode_AsWideCharString(pathobj, NULL);
+    if (!wpath) {
+        return NULL;
+    }
+    char *pattern = Py_EncodeLocale(wpath, NULL);
+    PyMem_Free(wpath);
+    if (!pattern) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    PyObject *list = PyList_New(0);
+    if (!list) {
+        PyMem_Free(pattern);
+        return NULL;
+    }
+#ifndef MS_WINDOWS
+    glob_t g = { 0 };
+    int rc = glob(pattern, GLOB_ONLYDIR | GLOB_NOESCAPE, NULL, &g);
+    PyMem_Free(pattern);
+    if (rc == GLOB_NOSPACE) {
+        globfree(&g);
+        Py_DECREF(list);
+        PyErr_NoMemory();
+        return NULL;
+    }
+    if (rc == 0) {
+        for (size_t i = 0; i < g.gl_pathc; i++) {
+            size_t len;
+            wchar_t *w = Py_DecodeLocale(g.gl_pathv[i], &len);
+            if (!w) {
+                Py_DECREF(list);
+                globfree(&g);
+                PyErr_NoMemory();
+                return NULL;
+            }
+            PyObject *item = PyUnicode_FromWideChar(w, len);
+            PyMem_RawFree(w);
+            if (!item || PyList_Append(list, item) < 0) {
+                Py_XDECREF(item);
+                Py_DECREF(list);
+                globfree(&g);
+                return NULL;
+            }
+            Py_DECREF(item);
+        }
+    }
+    globfree(&g);
+#else
+    PyMem_Free(pattern);
+#endif
+    return list;
+}
+
+
 static PyMethodDef getpath_methods[] = {
     {"abspath", getpath_abspath, METH_VARARGS, NULL},
     {"basename", getpath_basename, METH_VARARGS, NULL},
     {"dirname", getpath_dirname, METH_VARARGS, NULL},
+    {"glob", getpath_glob, METH_VARARGS, NULL},
     {"hassuffix", getpath_hassuffix, METH_VARARGS, NULL},
     {"isabs", getpath_isabs, METH_VARARGS, NULL},
     {"isdir", getpath_isdir, METH_VARARGS, NULL},

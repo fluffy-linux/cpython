@@ -211,6 +211,47 @@ def search_up(prefix, *landmarks, test=isfile):
         prefix = dirname(prefix)
 
 
+def split_path(s, delim):
+    if delim != ':' or '[' not in s:
+        return s.split(delim)
+    n = len(s)
+    res = []
+    seg_start = 0
+    i = 0
+    while i < n:
+        ch = s[i]
+        if ch == ':':
+            res.append(s[seg_start:i])
+            seg_start = i + 1
+            i += 1
+        elif ch == '[':
+            j = i + 1
+            if j < n and s[j] in ('!', '^'):
+                j += 1
+            if j < n and s[j] == ']':
+                j += 1
+            while j < n and s[j] != ']' and s[j] != '/':
+                if s[j] == '[' and j + 1 < n and s[j + 1] in (':', '.', '='):
+                    sub_end = s[j + 1] + ']'
+                    k = s.find(sub_end, j + 2)
+                    if (
+                        k != -1
+                        and '/' not in s[j + 2:k]
+                        and (s[j + 1] == '.' or ']' not in s[j + 2:k])
+                    ):
+                        j = k + 2
+                        continue
+                j += 1
+            if j < n and s[j] == ']':
+                i = j + 1
+            else:
+                i += 1
+        else:
+            i += 1
+    res.append(s[seg_start:n])
+    return res
+
+
 # ******************************************************************************
 # READ VARIABLES FROM config
 # ******************************************************************************
@@ -281,11 +322,20 @@ if not executable and program_name and ENV_PATH:
     # Resolve names against PATH.
     # NOTE: The use_environment value is ignored for this lookup.
     # To properly isolate, launch Python with a full path.
-    for p in ENV_PATH.split(DELIM):
-        p = joinpath(p, program_name)
-        if isxfile(p):
-            executable = p
-            break
+    for d in split_path(ENV_PATH, DELIM):
+        if '*' in d or '?' in d or '[' in d:
+            for gd in glob(d):
+                p = joinpath(gd, program_name)
+                if isxfile(p):
+                    executable = p
+                    break
+            if executable:
+                break
+        else:
+            p = joinpath(d, program_name)
+            if isxfile(p):
+                executable = p
+                break
 
 if not executable:
     executable = ''
