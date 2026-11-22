@@ -587,7 +587,10 @@ def skip_android_selinux(name):
     )
 
 if sys.platform not in {"win32", "vxworks", "ios", "tvos", "watchos"}:
-    unix_shell = '/system/bin/sh' if is_android else '/bin/sh'
+    unix_shell = (
+        '/system/bin/sh' if is_android
+        else ('/sw/bash/bin/bash' if os.path.exists('/sw/bash/bin/bash') else '/bin/sh')
+    )
 else:
     unix_shell = None
 

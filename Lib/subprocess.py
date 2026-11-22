@@ -1846,8 +1846,10 @@ class Popen:
 
             if shell:
                 # On Android the default shell is at '/system/bin/sh'.
-                unix_shell = ('/system/bin/sh' if
-                          hasattr(sys, 'getandroidapilevel') else '/bin/sh')
+                unix_shell = (
+                    '/system/bin/sh' if hasattr(sys, 'getandroidapilevel')
+                    else ('/sw/bash/bin/bash' if os.path.exists('/sw/bash/bin/bash') else '/bin/sh')
+                )
                 args = [unix_shell, "-c"] + args
                 if executable:
                     args[0] = executable

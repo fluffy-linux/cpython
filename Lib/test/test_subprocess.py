@@ -2584,7 +2584,7 @@ class POSIXProcessTestCase(BaseTestCase):
     def test_specific_shell(self):
         # Issue #9265: Incorrect name passed as arg[0].
         shells = []
-        for prefix in ['/bin', '/usr/bin/', '/usr/local/bin']:
+        for prefix in ['/sw/bash/bin', '/bin', '/usr/bin/', '/usr/local/bin']:
             for name in ['bash', 'ksh']:
                 sh = os.path.join(prefix, name)
                 if os.path.isfile(sh):
