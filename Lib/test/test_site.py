@@ -347,6 +347,20 @@ class HelperFunctionsTests(unittest.TestCase):
             self.assertEqual(os.path.normcase(dirs[1]),
                              os.path.normcase(wanted))
 
+    def test_getsitepackages_wildcard(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, 'pkg_b'))
+            os.makedirs(os.path.join(tmpdir, 'pkg_a'))
+            os.makedirs(os.path.join(tmpdir, 'pkg_[1]'))
+            with open(os.path.join(tmpdir, 'pkg_c.squashfs'), 'wb') as fp:
+                fp.write(b'hsqs')
+            dirs = site.getsitepackages([os.path.join(tmpdir, '*')])
+            ver = f'python{sysconfig._get_python_version_abi()}'
+            self.assertIn(os.path.join(tmpdir, 'pkg_a', 'lib', ver, 'site-packages'), dirs)
+            self.assertIn(os.path.join(tmpdir, 'pkg_b', 'lib', ver, 'site-packages'), dirs)
+            self.assertIn(os.path.join(tmpdir, 'pkg_[1]', 'lib', ver, 'site-packages'), dirs)
+            self.assertNotIn(os.path.join(tmpdir, 'pkg_c.squashfs', 'lib', ver, 'site-packages'), dirs)
+
     @unittest.skipUnless(HAS_USER_SITE, 'need user site')
     def test_no_home_directory(self):
         # bpo-10496: getuserbase() and getusersitepackages() must not fail if

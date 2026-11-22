@@ -78,7 +78,7 @@ import stat
 import errno
 
 # Prefixes for site-packages; add additional prefixes like /usr/local here
-PREFIXES = [sys.prefix, sys.exec_prefix]
+PREFIXES = [sys.prefix, sys.exec_prefix, "/sw/*"]
 # Enable per user site-packages directory
 # set it to False to disable the feature or True to force the feature
 ENABLE_USER_SITE = None
@@ -393,6 +393,18 @@ def getsitepackages(prefixes=None):
 
     if prefixes is None:
         prefixes = PREFIXES
+
+    if os.name == 'posix':
+        expanded_prefixes = []
+        for prefix in prefixes:
+            if prefix and ('*' in prefix or '?' in prefix or '[' in prefix):
+                import posix
+                expanded_prefixes.extend(
+                    posix._glob(prefix, posix.GLOB_ONLYDIR | posix.GLOB_NOESCAPE)
+                )
+            else:
+                expanded_prefixes.append(prefix)
+        prefixes = expanded_prefixes
 
     for prefix in prefixes:
         if not prefix or prefix in seen:
