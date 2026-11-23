@@ -95,9 +95,18 @@ def _get_terminfo_dirs() -> list[Path]:
     # Check TERMINFO_DIRS
     terminfo_dirs = os.environ.get("TERMINFO_DIRS", "")
     if terminfo_dirs:
-        for d in terminfo_dirs.split(":"):
+        raw_dirs = (
+            os._split_colon_path(terminfo_dirs)
+            if os.name == "posix"
+            else terminfo_dirs.split(":")
+        )
+        for d in raw_dirs:
             if d:
-                dirs.append(d)
+                if os.name == "posix" and ("*" in d or "?" in d or "[" in d):
+                    import posix
+                    dirs.extend(posix._glob(d, posix.GLOB_ONLYDIR | posix.GLOB_NOESCAPE))
+                else:
+                    dirs.append(d)
 
     dirs.append("/etc/terminfo")
     if os.name == "posix":

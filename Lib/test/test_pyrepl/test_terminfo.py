@@ -670,3 +670,31 @@ class TestTerminfoDirs(unittest.TestCase):
         # packages' /sw/*/share/terminfo.
         if "/etc/terminfo" in dirs and sw:
             self.assertLess(dirs.index("/etc/terminfo"), dirs.index(sw[0]))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX wildcard search lists")
+    def test_wildcard_terminfo_dirs(self):
+        import tempfile
+        from pathlib import Path
+        from test.support import os_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dir_a = os.path.join(tmp, "pkg_a", "share", "terminfo")
+            dir_b = os.path.join(tmp, "pkg_b", "share", "terminfo")
+            dir_c = os.path.join(tmp, "1:c", "terminfo")
+            for d in (dir_b, dir_a, dir_c):
+                os.makedirs(d)
+            os.makedirs(os.path.join(tmp, "pkg_f", "share"))
+            with open(os.path.join(tmp, "pkg_f", "share", "terminfo"), "w"):
+                pass
+            with os_helper.EnvironmentVarGuard() as env:
+                env.unset("TERMINFO")
+                env["TERMINFO_DIRS"] = ":".join([
+                    os.path.join(tmp, "*", "share", "terminfo"),
+                    os.path.join(tmp, "missing", "*"),
+                    os.path.join(tmp, "1[x:]c", "terminfo"),
+                ])
+                dirs = terminfo._get_terminfo_dirs()
+            # Each match of a wildcard element, in order; no file, nothing
+            # for an element matching nothing; ":" in a bracket is matched.
+            ours = [d for d in dirs if str(d).startswith(tmp)]
+            self.assertEqual(ours, [Path(dir_a), Path(dir_b), Path(dir_c)])
