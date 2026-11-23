@@ -649,3 +649,24 @@ class TestCursesCompatibility(unittest.TestCase):
             with self.subTest(term=term):
                 with self.assertRaises(exc):
                     terminfo._validate_terminal_name_or_raise(term)
+
+
+class TestTerminfoDirs(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "POSIX wildcard search lists")
+    def test_sw_terminfo_dirs(self):
+        import glob
+        from test.support import os_helper
+
+        with os_helper.EnvironmentVarGuard() as env:
+            env.unset("TERMINFO")
+            env.unset("TERMINFO_DIRS")
+            dirs = [str(d) for d in terminfo._get_terminfo_dirs()]
+        sw = sorted(d for d in glob.glob("/sw/*/share/terminfo")
+                    if os.path.isdir(d))
+        # Every package's terminfo directory, in order, comes first among
+        # the /sw ones.
+        self.assertEqual([d for d in dirs if d.startswith("/sw/")][:len(sw)], sw)
+        # The administrator's /etc/terminfo is searched before the
+        # packages' /sw/*/share/terminfo.
+        if "/etc/terminfo" in dirs and sw:
+            self.assertLess(dirs.index("/etc/terminfo"), dirs.index(sw[0]))

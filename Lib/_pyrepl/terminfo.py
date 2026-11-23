@@ -99,9 +99,13 @@ def _get_terminfo_dirs() -> list[Path]:
             if d:
                 dirs.append(d)
 
+    dirs.append("/etc/terminfo")
+    if os.name == "posix":
+        import posix
+        dirs.extend(posix._glob("/sw/*/share/terminfo", posix.GLOB_ONLYDIR | posix.GLOB_NOESCAPE))
     dirs.extend(
         [
-            "/etc/terminfo",
+            "/sw/ncurses/share/terminfo",
             "/lib/terminfo",
             "/usr/lib/terminfo",
             "/usr/share/terminfo",
