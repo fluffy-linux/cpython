@@ -2404,6 +2404,50 @@ class TestWhich(BaseTest, unittest.TestCase):
         rv = shutil.which(self.file, path=self.dir)
         self.assertEqual(rv, self.filepath)
 
+    def test_wildcard_path(self):
+        wildcard = os.path.join(os.path.dirname(self.dir), self.to_text_type('*'))
+        rv = shutil.which(self.file, path=wildcard)
+        self.assertEqual(rv, self.filepath)
+
+        base_name = os.path.basename(self.dir)
+        bracket = os.path.join(
+            os.path.dirname(self.dir),
+            self.to_text_type('[') + base_name[:1] + self.to_text_type(']*'),
+        )
+        self.assertEqual(shutil.which(self.file, path=bracket), self.filepath)
+
+        sep = os.fsencode(os.pathsep) if isinstance(self.file, bytes) else os.pathsep
+        dot = os.fsencode(os.curdir) if isinstance(self.file, bytes) else os.curdir
+        with os_helper.change_cwd(path=self.dir):
+            self.assertEqual(
+                shutil.which(self.file, path=sep + wildcard),
+                self.file,
+            )
+            self.assertEqual(
+                shutil.which(self.file, path=dot + sep + wildcard),
+                os.path.join(dot, self.file),
+            )
+
+        if os.name == 'posix' and os.pathsep == ':':
+            colon_dir = os.path.join(os.path.dirname(self.dir), self.to_text_type('p:b'))
+            os.makedirs(colon_dir, exist_ok=True)
+            colon_exe = os.path.join(colon_dir, self.file)
+            shutil.copy2(self.filepath, colon_exe)
+            unclosed_seg = os.path.join(
+                os.path.dirname(self.dir),
+                self.to_text_type('[unclosed'),
+                self.to_text_type('sub'),
+            )
+            bkt_colon_pat = os.path.join(
+                os.path.dirname(self.dir),
+                self.to_text_type('p[a:]b'),
+            )
+            self.assertEqual(
+                shutil.which(self.file, path=unclosed_seg + sep + bkt_colon_pat),
+                colon_exe,
+            )
+            shutil.rmtree(colon_dir)
+
     def test_absolute_cmd(self):
         # When given the fully qualified path to an executable that exists,
         # it should be returned.

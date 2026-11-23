@@ -1595,10 +1595,41 @@ def which(cmd, mode=os.F_OK | os.X_OK, path=None):
 
         if use_bytes:
             path = os.fsencode(path)
-            path = path.split(os.fsencode(os.pathsep))
+            has_wildcard = (
+                os.name == "posix"
+                and (b'*' in path or b'?' in path or b'[' in path)
+            )
+            if has_wildcard and os.pathsep == ':':
+                path = os._split_colon_path(path)
+            else:
+                path = path.split(os.fsencode(os.pathsep))
         else:
             path = os.fsdecode(path)
-            path = path.split(os.pathsep)
+            has_wildcard = (
+                os.name == "posix"
+                and ('*' in path or '?' in path or '[' in path)
+            )
+            if has_wildcard and os.pathsep == ':':
+                path = os._split_colon_path(path)
+            else:
+                path = path.split(os.pathsep)
+
+        if has_wildcard:
+            import posix
+            expanded = []
+            if use_bytes:
+                for d in path:
+                    if b'*' in d or b'?' in d or b'[' in d:
+                        expanded.extend(posix._glob(d, posix.GLOB_NOESCAPE))
+                    else:
+                        expanded.append(d)
+            else:
+                for d in path:
+                    if '*' in d or '?' in d or '[' in d:
+                        expanded.extend(posix._glob(d, posix.GLOB_NOESCAPE))
+                    else:
+                        expanded.append(d)
+            path = expanded
 
         if sys.platform == "win32" and _win_path_needs_curdir(cmd, mode):
             curdir = os.curdir

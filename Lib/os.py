@@ -650,6 +650,109 @@ def _execvpe(file, args, env=None):
     raise last_exc
 
 
+def _split_colon_path(path_list):
+    if isinstance(path_list, bytes):
+        if b'[' not in path_list:
+            return path_list.split(b':')
+        colon = ord(':')
+        lbrack = ord('[')
+        rbrack = ord(']')
+        slash = ord('/')
+        bang = ord('!')
+        caret = ord('^')
+        dot = ord('.')
+        equal = ord('=')
+        n = len(path_list)
+        res = []
+        seg_start = 0
+        i = 0
+        while i < n:
+            ch = path_list[i]
+            if ch == colon:
+                res.append(path_list[seg_start:i])
+                seg_start = i + 1
+                i += 1
+            elif ch == lbrack:
+                j = i + 1
+                if j < n and (path_list[j] == bang or path_list[j] == caret):
+                    j += 1
+                if j < n and path_list[j] == rbrack:
+                    j += 1
+                while j < n and path_list[j] != rbrack and path_list[j] != slash:
+                    if (
+                        path_list[j] == lbrack
+                        and j + 1 < n
+                        and path_list[j + 1] in (colon, dot, equal)
+                    ):
+                        kind = path_list[j + 1]
+                        k = j + 2
+                        while (
+                            k + 1 < n
+                            and path_list[k] != slash
+                            and (kind == dot or path_list[k] != rbrack)
+                        ):
+                            if path_list[k] == kind and path_list[k + 1] == rbrack:
+                                j = k + 2
+                                break
+                            k += 1
+                        else:
+                            j += 1
+                            continue
+                        continue
+                    j += 1
+                if j < n and path_list[j] == rbrack:
+                    i = j + 1
+                else:
+                    i += 1
+            else:
+                i += 1
+        res.append(path_list[seg_start:n])
+        return res
+
+    if '[' not in path_list:
+        return path_list.split(':')
+    n = len(path_list)
+    res = []
+    seg_start = 0
+    i = 0
+    while i < n:
+        ch = path_list[i]
+        if ch == ':':
+            res.append(path_list[seg_start:i])
+            seg_start = i + 1
+            i += 1
+        elif ch == '[':
+            j = i + 1
+            if j < n and path_list[j] in ('!', '^'):
+                j += 1
+            if j < n and path_list[j] == ']':
+                j += 1
+            while j < n and path_list[j] != ']' and path_list[j] != '/':
+                if (
+                    path_list[j] == '['
+                    and j + 1 < n
+                    and path_list[j + 1] in (':', '.', '=')
+                ):
+                    sub_end = path_list[j + 1] + ']'
+                    k = path_list.find(sub_end, j + 2)
+                    if (
+                        k != -1
+                        and '/' not in path_list[j + 2:k]
+                        and (path_list[j + 1] == '.' or ']' not in path_list[j + 2:k])
+                    ):
+                        j = k + 2
+                        continue
+                j += 1
+            if j < n and path_list[j] == ']':
+                i = j + 1
+            else:
+                i += 1
+        else:
+            i += 1
+    res.append(path_list[seg_start:n])
+    return res
+
+
 def get_exec_path(env=None):
     """Returns the sequence of directories that will be searched for the
     named executable (similar to a shell) when launching a process.
@@ -691,6 +794,18 @@ def get_exec_path(env=None):
 
     if path_list is None:
         path_list = defpath
+    if (
+        name == 'posix'
+        and pathsep == ':'
+        and ('*' in path_list or '?' in path_list or '[' in path_list)
+    ):
+        expanded = []
+        for d in _split_colon_path(path_list):
+            if '*' in d or '?' in d or '[' in d:
+                expanded.extend(_glob(d, GLOB_NOESCAPE))
+            else:
+                expanded.append(d)
+        return expanded
     return path_list.split(pathsep)
 
 

@@ -1228,6 +1228,40 @@ class EnvironTests(mapping_tests.BasicTestMappingProtocol):
         # Supplied PATH environment variable
         self.assertSequenceEqual(test_path, os.get_exec_path(test_env))
 
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dir_a = os.path.join(tmpdir, 'pkg_a', 'bin')
+            dir_b = os.path.join(tmpdir, 'pkg_b', 'bin')
+            os.makedirs(dir_b)
+            os.makedirs(dir_a)
+            wildcard_path = os.path.join(tmpdir, '*', 'bin')
+            self.assertSequenceEqual([dir_a, dir_b],
+                                     os.get_exec_path({'PATH': wildcard_path}))
+            bracket_path = f":{os.path.join(tmpdir, 'pkg_[ab]', 'bin')}::/usr/bin:"
+            self.assertSequenceEqual(
+                ['', dir_a, dir_b, '', '/usr/bin', ''],
+                os.get_exec_path({'PATH': bracket_path}),
+            )
+            dir_colon = os.path.join(tmpdir, '1:b', 'bin')
+            dir_unclosed = os.path.join(tmpdir, '[unclosed', 'sub')
+            os.makedirs(dir_colon)
+            os.makedirs(dir_unclosed)
+            colon_bkt_path = (
+                f"{dir_unclosed}:{os.path.join(tmpdir, '1[a:]b', 'bin')}"
+                f":{os.path.join(tmpdir, '[[:alpha:]]*', 'bin')}"
+            )
+            self.assertSequenceEqual(
+                [dir_unclosed, dir_colon, dir_a, dir_b],
+                os.get_exec_path({'PATH': colon_bkt_path}),
+            )
+            self.assertEqual(
+                os._split_colon_path('[[:alpha]:[[:digit:]]]/bin'),
+                ['[[:alpha]', '[[:digit:]]]/bin'],
+            )
+            self.assertEqual(
+                os._split_colon_path(b'[[:alpha]:[[:digit:]]]/bin'),
+                [b'[[:alpha]', b'[[:digit:]]]/bin'],
+            )
+
         if os.supports_bytes_environ:
             # env cannot contain 'PATH' and b'PATH' keys
             try:
